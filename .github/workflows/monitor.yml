@@ -20,6 +20,9 @@ concurrency:
 jobs:
   monitor:
     runs-on: ubuntu-latest
+    container:
+      image: mcr.microsoft.com/playwright/python:v1.58.0-noble
+      options: --ipc=host
     timeout-minutes: 8
     env:
       GMAIL_USER: ${{ secrets.GMAIL_USER }}
@@ -35,9 +38,6 @@ jobs:
           cache: pip
       - name: Install Python dependency
         run: python -m pip install -r requirements.txt
-      - name: Install Chromium
-        if: github.event_name != 'workflow_dispatch' || inputs.mode == 'check'
-        run: python -m playwright install --with-deps chromium
       - name: Test email
         if: github.event_name == 'workflow_dispatch' && inputs.mode == 'test-email'
         run: python monitor.py --test-email
