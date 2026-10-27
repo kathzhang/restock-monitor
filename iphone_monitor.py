@@ -12,7 +12,7 @@ import re
 import smtplib
 import ssl
 import sys
-from urllib.parse import urlparse, urljoin
+from urllib.parse import urlparse, urljoin, parse_qsl, urlencode, urlunparse
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
 
@@ -90,6 +90,8 @@ def parse_pickup(data, part=EXPECTED_PART):
         raise CheckError('Pickup response schema changed') from None
     if not isinstance(stores, list) or not stores:
         raise CheckError('No store results; availability is UNKNOWN')
+    if pickup.get('location') is not None and str(pickup['location']) != ZIP_CODE:
+        raise CheckError('Pickup response ZIP does not match requested ZIP')
     rows, seen = [], set()
     for store in stores:
         if not isinstance(store, dict):
@@ -109,6 +111,11 @@ def parse_pickup(data, part=EXPECTED_PART):
             raise CheckError('Exact SKU pickup selection state missing') from None
         if type(selectable) is not bool:
             raise CheckError('Pickup selection state must be a boolean')
+        title = regular.get('storePickupProductTitle')
+        if title and clean_text(title) != PRODUCT_NAME:
+            raise CheckError('Pickup response product title does not match exact configuration')
+        if availability.get('pickupDisplay') == 'unavailable' and selectable:
+            raise CheckError('Pickup display conflicts with selectable store')
         # This is the flag Apple's public pickup-dialog code uses to enable a store.
         quote = clean_text(availability.get('pickupSearchQuote') or regular.get('storePickupQuote')
                            or availability.get('storePickupQuote'))
@@ -163,7 +170,7 @@ def diagnostics(page, message):
         print('Screenshot unavailable; inspect error.txt', flush=True)
 
 
-def check_stock():
+def check_stock(document=False):
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -184,10 +191,20 @@ def check_stock():
             parsed = urlparse(endpoint)
             if parsed.scheme != 'https' or parsed.netloc != 'www.apple.com' or parsed.path != '/shop/fulfillment-messages':
                 raise CheckError('Unexpected pickup endpoint')
-            response = context.request.get(endpoint, params={
+            params = {
                 'parts.0': part, 'cppart': 'UNLOCKED/US', 'purchaseOption': 'fullPrice',
-                'location': ZIP_CODE, 'mts.0': 'regular',
-            }, timeout=45000)
+                'location': ZIP_CODE,
+            }
+            if document:
+                query = dict(parse_qsl(parsed.query))
+                query.update(params)
+                target = urlunparse(parsed._replace(query=urlencode(query)))
+                stock_page = context.new_page()
+                response = stock_page.goto(target, wait_until='domcontentloaded', timeout=45000)
+                if response is None:
+                    raise CheckError('Pickup document returned no response')
+            else:
+                response = context.request.get(endpoint, params={**params, 'mts.0': 'regular'}, timeout=45000)
             if response.status != 200:
                 raise CheckError('Apple pickup query HTTP ' + str(response.status) + '; inventory UNKNOWN')
             if 'json' not in response.headers.get('content-type', '').lower():
@@ -337,6 +354,7 @@ def main(argv=None):
     modes.add_argument('--check-only', action='store_true', help='Query stock but send no notifications')
     parser.add_argument('--ui', action='store_true', help='Use visible pickup dialog')
     parser.add_argument('--headed', action='store_true', help='Show isolated browser; requires --ui')
+    parser.add_argument('--document', action='store_true', help='Diagnose public pickup URL as browser document')
     args = parser.parse_args(argv)
     if args.headed and not args.ui:
         parser.error('--headed requires --ui')
@@ -346,7 +364,7 @@ def main(argv=None):
             sender('【测试】iPhone Duo 取货监控', '这是通道测试，不代表有货。\n' + PRODUCT_URL)
             print('Test accepted by service', flush=True)
             return 0
-        rows = check_stock_ui(headed=args.headed) if args.ui else check_stock()
+        rows = check_stock_ui(headed=args.headed) if args.ui else check_stock(document=True) if args.document else check_stock()
         print('Coverage: Apple returned stores only; not guaranteed exhaustive', flush=True)
         for row in rows:
             print(f"{row['name']} | {row['distance_miles']:g} mi | "
