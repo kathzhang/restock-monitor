@@ -1,0 +1,48 @@
+name: iPhone Duo Fast Monitor
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'check=检测并通知; check-only=仅检测'
+        type: choice
+        options:
+          - check
+          - check-only
+        default: check-only
+permissions:
+  contents: read
+concurrency:
+  group: iphone-duo-fast
+  cancel-in-progress: false
+jobs:
+  monitor:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    env:
+      GMAIL_USER: ${{ secrets.GMAIL_USER }}
+      GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+      EMAIL_TO: ${{ secrets.EMAIL_TO }}
+      BARK_KEY: ${{ secrets.BARK_KEY }}
+      PYTHONUNBUFFERED: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+      - name: Install Playwright API client (no browser download)
+        run: python -m pip install playwright==1.58.0
+      - name: Check only
+        if: inputs.mode == 'check-only'
+        run: python iphone_monitor.py --fast --check-only
+      - name: Check Duo and alert immediately
+        if: inputs.mode == 'check'
+        run: python iphone_monitor.py --fast
+      - name: Save diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: iphone-fast-${{ github.run_id }}
+          path: artifacts/iphone/
+          if-no-files-found: ignore
+          retention-days: 3
