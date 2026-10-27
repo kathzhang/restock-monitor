@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Apple pickup check for 11201, nearest 12 returned stores, 512GB Star White, carrier later."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from email.message import EmailMessage
 import html
+from html.parser import HTMLParser
 import json
 import math
 import os
@@ -12,6 +14,7 @@ import re
 import smtplib
 import ssl
 import sys
+import time
 from urllib.parse import urlparse, urljoin, parse_qsl, urlencode, urlunparse
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo
@@ -27,6 +30,12 @@ ARTIFACTS = Path('artifacts/iphone')
 
 class CheckError(RuntimeError):
     pass
+
+
+class RateLimitedError(CheckError):
+    def __init__(self, status, retry_after=120):
+        super().__init__(f'Apple pickup HTTP {status}; inventory UNKNOWN')
+        self.retry_after = max(120, min(600, retry_after))
 
 
 def required(name):
@@ -133,6 +142,10 @@ def parse_pickup(data, part=EXPECTED_PART):
 def verify_product(page):
     """Verify JSON-LD from this exact configuration, not a related item or cart button."""
     candidates = page.locator('script[type="application/ld+json"]').all_text_contents()
+    return verify_product_jsonld(candidates)
+
+
+def verify_product_jsonld(candidates):
     products = []
     def walk(obj):
         if isinstance(obj, list):
@@ -170,6 +183,70 @@ def diagnostics(page, message):
         page.screenshot(path=str(ARTIFACTS / 'failure.png'), full_page=True, timeout=15000)
     except Exception:
         print('Screenshot unavailable; inspect error.txt', flush=True)
+
+
+def check_stock_fast():
+    """Same exact-product and pickup checks through Playwright, without Chromium startup."""
+    from playwright.sync_api import sync_playwright
+
+    class ProductScripts(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.active, self.chunks, self.scripts = False, [], []
+
+        def handle_starttag(self, tag, attrs):
+            if tag == 'script':
+                self.active = dict(attrs).get('type') == 'application/ld+json'
+                self.chunks = []
+
+        def handle_data(self, data):
+            if self.active:
+                self.chunks.append(data)
+
+        def handle_endtag(self, tag):
+            if tag == 'script' and self.active:
+                self.scripts.append(''.join(self.chunks))
+                self.active = False
+
+    started = time.perf_counter()
+    ARTIFACTS.mkdir(parents=True, exist_ok=True)
+    with sync_playwright() as p:
+        context = p.request.new_context(timeout=15000)
+        try:
+            product = context.get(PRODUCT_URL)
+            if product.status != 200:
+                raise CheckError('Product page did not return HTTP 200')
+            parser = ProductScripts()
+            parser.feed(product.text())
+            part = verify_product_jsonld(parser.scripts)
+            print('Verified exact configuration: ' + part + ' + unlocked', flush=True)
+            response = context.get(PICKUP_URL, params={
+                'parts.0': part, 'pl': 'true', 'mts.0': 'regular', 'location': ZIP_CODE,
+            })
+            if response.status in (429, 541):
+                delay = response.headers.get('retry-after', '')
+                raise RateLimitedError(response.status, int(delay) if delay.isdigit() else 120)
+            if response.status != 200:
+                raise CheckError(f'Apple pickup query HTTP {response.status}; inventory UNKNOWN')
+            if 'json' not in response.headers.get('content-type', '').lower():
+                raise CheckError('Apple returned non-JSON; inventory UNKNOWN')
+            data = response.json()
+            rows = parse_pickup(data, part)
+            elapsed = round(time.perf_counter() - started, 3)
+            (ARTIFACTS / 'result.json').write_text(json.dumps({
+                'product': PRODUCT_NAME, 'zip': ZIP_CODE, 'max_stores': MAX_STORES,
+                'checked_at': datetime.now(ZoneInfo('America/New_York')).isoformat(),
+                'query_seconds': elapsed, 'stores': rows,
+            }, ensure_ascii=False, indent=2), encoding='utf-8')
+            (ARTIFACTS / 'pickup-response.json').write_text(json.dumps(data), encoding='utf-8')
+            print(f'Query completed in {elapsed:.3f}s', flush=True)
+            return rows
+        except Exception as exc:
+            detail = str(exc) if isinstance(exc, CheckError) else type(exc).__name__
+            (ARTIFACTS / 'error.txt').write_text(detail, encoding='utf-8')
+            raise
+        finally:
+            context.dispose()
 
 
 def check_stock(document=False):
@@ -333,14 +410,18 @@ def notify(rows):
     lines.extend(['', PRODUCT_URL, '请打开网页确认并下单；本通知不会保留库存。'])
     body = '\n'.join(lines)
     failures = 0
-    for name, sender in [('Bark', send_bark), ('Gmail', send_email)]:
-        try:
-            sender(title, body)
-            print(name + ': accepted by service', flush=True)
-        except Exception as exc:
-            failures += 1
-            detail = str(exc) if isinstance(exc, CheckError) else type(exc).__name__
-            print(name + ': failed: ' + detail, flush=True)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        pending = {executor.submit(sender, title, body): name
+                   for name, sender in [('Bark', send_bark), ('Gmail', send_email)]}
+        for future in as_completed(pending):
+            name = pending[future]
+            try:
+                future.result()
+                print(name + ': accepted by service', flush=True)
+            except Exception as exc:
+                failures += 1
+                detail = str(exc) if isinstance(exc, CheckError) else type(exc).__name__
+                print(name + ': failed: ' + detail, flush=True)
     return 1 if failures else 0
 
 
@@ -353,6 +434,7 @@ def main(argv=None):
     parser.add_argument('--ui', action='store_true', help='Use visible pickup dialog')
     parser.add_argument('--headed', action='store_true', help='Show isolated browser; requires --ui')
     parser.add_argument('--document', action='store_true', help='Diagnose public pickup URL as browser document')
+    parser.add_argument('--fast', action='store_true', help='Use Playwright HTTP session without Chromium')
     args = parser.parse_args(argv)
     if args.headed and not args.ui:
         parser.error('--headed requires --ui')
@@ -362,7 +444,7 @@ def main(argv=None):
             sender('【测试】iPhone Duo 取货监控', '这是通道测试，不代表有货。\n' + PRODUCT_URL)
             print('Test accepted by service', flush=True)
             return 0
-        rows = check_stock_ui(headed=args.headed) if args.ui else check_stock(document=True) if args.document else check_stock()
+        rows = check_stock_fast() if args.fast else check_stock_ui(headed=args.headed) if args.ui else check_stock(document=True) if args.document else check_stock()
         print('Coverage: Apple returned stores only; not guaranteed exhaustive', flush=True)
         for row in rows:
             print(f"{row['name']} | {row['distance_miles']:g} mi | "
@@ -375,6 +457,9 @@ def main(argv=None):
     except Exception as exc:
         detail = str(exc) if isinstance(exc, CheckError) else type(exc).__name__
         print('Pickup state: UNKNOWN — ' + detail, file=sys.stderr, flush=True)
+        if isinstance(exc, RateLimitedError):
+            print(f'Cooling down for {exc.retry_after}s; no immediate retries', flush=True)
+            time.sleep(exc.retry_after)
         return 1
 
 
