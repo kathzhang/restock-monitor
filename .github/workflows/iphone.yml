@@ -8,6 +8,7 @@ on:
         options:
           - check
           - check-only
+          - check-document
           - test-email
           - test-bark
         default: check-only
@@ -42,6 +43,9 @@ jobs:
       - name: Check only (no notifications)
         if: github.event_name == 'workflow_dispatch' && inputs.mode == 'check-only'
         run: python iphone_monitor.py --check-only
+      - name: Diagnose pickup URL (no notifications)
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'check-document'
+        run: python iphone_monitor.py --document --check-only
       - name: Check pickup availability
         if: github.event_name != 'workflow_dispatch' || inputs.mode == 'check'
         run: python iphone_monitor.py
