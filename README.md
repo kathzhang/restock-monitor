@@ -1,1 +1,1 @@
-# luxury-restock-monitor
+# restock-monitor
