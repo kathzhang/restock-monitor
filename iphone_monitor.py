@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apple pickup check for 11201, <=20 mi, iPhone Duo 512GB Star White, carrier later."""
+"""Apple pickup check for 11201, nearest 12 returned stores, 512GB Star White, carrier later."""
 import argparse
 from datetime import datetime
 from email.message import EmailMessage
@@ -20,7 +20,7 @@ PRODUCT_URL = 'https://www.apple.com/shop/buy-iphone/iphone-duo/7.6-inch-display
 PRODUCT_NAME = 'iPhone Duo 512GB Star White'
 EXPECTED_PART = 'MK1G4LL/A'
 ZIP_CODE = '11201'
-RADIUS_MILES = 20.0
+MAX_STORES = 12
 ARTIFACTS = Path('artifacts/iphone')
 
 
@@ -101,8 +101,6 @@ def parse_pickup(data, part=EXPECTED_PART):
             continue
         seen.add(store_id)
         distance = distance_miles(store)
-        if distance > RADIUS_MILES:
-            continue
         try:
             availability = store['partsAvailability'][part]
             regular = availability['messageTypes']['regular']
@@ -119,8 +117,8 @@ def parse_pickup(data, part=EXPECTED_PART):
         rows.append({'store_id': store_id, 'name': name, 'distance_miles': round(distance, 2),
                      'available': selectable, 'quote': quote or 'Not selectable for pickup'})
     if not rows:
-        raise CheckError('No verifiable stores within 20 miles')
-    return sorted(rows, key=lambda row: row['distance_miles'])
+        raise CheckError('No verifiable store results')
+    return sorted(rows, key=lambda row: row['distance_miles'])[:MAX_STORES]
 
 
 def verify_product(page):
@@ -200,7 +198,7 @@ def check_stock():
             (ARTIFACTS / 'pickup-response.json').write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding='utf-8')
             rows = parse_pickup(data, part)
             (ARTIFACTS / 'result.json').write_text(json.dumps({
-                'product': PRODUCT_NAME, 'zip': ZIP_CODE, 'radius_miles': RADIUS_MILES,
+                'product': PRODUCT_NAME, 'zip': ZIP_CODE, 'max_stores': MAX_STORES,
                 'coverage': 'Apple returned stores only; not a complete store census', 'stores': rows,
             }, ensure_ascii=False, indent=2), encoding='utf-8')
             return rows
@@ -213,11 +211,108 @@ def check_stock():
             browser.close()
 
 
+def classify_visible_store(name, distance_text, quote, enabled):
+    """A visible store row is authoritative only for that store, never the whole radius."""
+    name, quote = clean_text(name), clean_text(quote)
+    if not name.startswith('Apple ') or type(enabled) is not bool:
+        raise CheckError('Visible store identity/selection state missing')
+    distance = distance_miles({'storeDistanceWithUnit': distance_text})
+    if re.fullmatch(r'Currently unavailable(?: for pickup)?', quote, re.I):
+        if enabled:
+            raise CheckError('Visible pickup quote conflicts with enabled store')
+        available = False
+    elif enabled and re.match(r'^(?:Available(?:\s|$)|Pick\s?up(?:\s|:)|Ready for pickup)', quote, re.I):
+        available = True
+    else:
+        raise CheckError('Unrecognized visible pickup quote or conflicting selection state')
+    return {'store_id': name, 'name': name, 'distance_miles': round(distance, 2),
+            'available': available, 'quote': quote}
+
+
+def read_visible_stores(overlay):
+    rows = []
+    for option in overlay.locator('.rf-productlocator-storeoption').all():
+        if not option.is_visible():
+            continue
+        left = option.locator('.form-selector-left-col')
+        right = option.locator('.form-selector-right-col')
+        lines = [clean_text(line) for line in left.inner_text().splitlines() if clean_text(line)]
+        names = [line for line in lines if line.startswith('Apple ')]
+        distances = [line for line in lines if re.fullmatch(r'[0-9.]+\s*(?:mi|miles?|km)', line, re.I)]
+        if len(names) != 1 or len(distances) != 1:
+            raise CheckError('Visible store name/distance schema changed')
+        quote = clean_text(right.inner_text())
+        quote = re.sub(r'\s*In-Store Pickup\s*$', '', quote, flags=re.I)
+        control = option.get_by_role('radio')
+        if control.count() != 1:
+            raise CheckError('Visible store selection control missing')
+        row = classify_visible_store(names[0], distances[0], quote, control.is_enabled())
+        rows.append(row)
+    if not rows:
+        raise CheckError('No visible verifiable store results')
+    return sorted(rows, key=lambda row: row['distance_miles'])[:MAX_STORES]
+
+
+def check_stock_ui(headed=False):
+    """Use the public pickup dialog. Never substitute shipping/Add to Bag for pickup."""
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=not headed)
+        page = browser.new_page(locale='en-US', timezone_id='America/New_York',
+                                viewport={'width': 1440, 'height': 1000})
+        page.set_default_timeout(20000)
+        failures = []
+        def observe(response):
+            if '/shop/fulfillment-messages' in response.url and response.status != 200:
+                failures.append(response.status)
+        page.on('response', observe)
+        try:
+            response = page.goto(PRODUCT_URL, wait_until='domcontentloaded', timeout=60000)
+            if response is None or response.status != 200:
+                raise CheckError('Product page did not return HTTP 200')
+            verify_product(page)
+            page.get_by_role('button', name=re.compile(r'Check Availability')).last.click()
+            overlay = page.locator('.rf-productlocator-overlay')
+            overlay.wait_for(state='visible')
+            white = overlay.get_by_role('radio', name='Star White', exact=True)
+            capacity = overlay.get_by_role('radio', name=re.compile(r'^512GB'))
+            white.check()
+            capacity.check()
+            location = overlay.get_by_role('combobox', name='City or Zip', exact=True)
+            location.fill(ZIP_CODE)
+            location.press('Enter')
+            overlay.get_by_role('heading', name=re.compile(r'Pick it up at an Apple Store near:\s*' + ZIP_CODE + r'$')).wait_for()
+            overlay.locator('.rf-productlocator-ispickuploading').wait_for(state='hidden')
+            toggle = overlay.get_by_role('button', name=re.compile(r'Not available today at .* stores'))
+            if toggle.count() and toggle.get_attribute('aria-expanded') == 'false':
+                toggle.click()
+            overlay.locator('.rf-productlocator-storeoption').first.wait_for(state='visible')
+            if not white.is_checked() or not capacity.is_checked() or location.input_value() != ZIP_CODE:
+                raise CheckError('Visible dialog configuration/ZIP could not be verified')
+            rows = read_visible_stores(overlay)
+            ARTIFACTS.mkdir(parents=True, exist_ok=True)
+            (ARTIFACTS / 'result.json').write_text(json.dumps({
+                'product': PRODUCT_NAME, 'zip': ZIP_CODE, 'max_stores': MAX_STORES,
+                'source': 'visible pickup dialog',
+                'coverage': 'Apple displayed stores only; not a complete store census', 'stores': rows,
+            }, ensure_ascii=False, indent=2), encoding='utf-8')
+            page.screenshot(path=str(ARTIFACTS / 'pickup-dialog.png'), full_page=True)
+            return rows
+        except Exception as exc:
+            detail = str(exc) if isinstance(exc, CheckError) else type(exc).__name__
+            if failures:
+                detail += '; page pickup request HTTP ' + ','.join(map(str, sorted(set(failures))))
+            diagnostics(page, detail)
+            raise CheckError(detail) from None
+        finally:
+            browser.close()
+
+
 def notify(rows):
     now = datetime.now(ZoneInfo('America/New_York')).isoformat(timespec='seconds')
     title = '【到店取货提醒】iPhone Duo 白色 512GB'
     lines = [PRODUCT_NAME, 'Connect on your own later / Full price',
-             f'ZIP {ZIP_CODE}，Apple 所列距离 ≤ {RADIUS_MILES:g} mi', '检测时间（纽约）：' + now, '']
+             f'ZIP {ZIP_CODE}，Apple 返回门店中最近 {MAX_STORES} 家', '检测时间（纽约）：' + now, '']
     for row in rows:
         lines.append(f"{row['name']}（{row['distance_miles']:g} mi）\n{row['quote']}")
     lines.extend(['', PRODUCT_URL, '请打开网页确认并下单；本通知不会保留库存。'])
@@ -240,14 +335,18 @@ def main(argv=None):
     modes.add_argument('--test-email', action='store_true')
     modes.add_argument('--test-bark', action='store_true')
     modes.add_argument('--check-only', action='store_true', help='Query stock but send no notifications')
+    parser.add_argument('--ui', action='store_true', help='Use visible pickup dialog')
+    parser.add_argument('--headed', action='store_true', help='Show isolated browser; requires --ui')
     args = parser.parse_args(argv)
+    if args.headed and not args.ui:
+        parser.error('--headed requires --ui')
     try:
         if args.test_email or args.test_bark:
             sender = send_email if args.test_email else send_bark
             sender('【测试】iPhone Duo 取货监控', '这是通道测试，不代表有货。\n' + PRODUCT_URL)
             print('Test accepted by service', flush=True)
             return 0
-        rows = check_stock()
+        rows = check_stock_ui(headed=args.headed) if args.ui else check_stock()
         print('Coverage: Apple returned stores only; not guaranteed exhaustive', flush=True)
         for row in rows:
             print(f"{row['name']} | {row['distance_miles']:g} mi | "
