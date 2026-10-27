@@ -10,6 +10,7 @@ import ssl
 import sys
 import time
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.message import EmailMessage
 from urllib.request import Request, urlopen
 
@@ -113,16 +114,19 @@ def detect_stock(timeout=45):
             response = page.goto(PRODUCT_URL, wait_until='domcontentloaded', timeout=60000)
             if response is None or response.status >= 400:
                 raise RuntimeError('Product page HTTP error')
-            # Give client-side stock code time to replace initial HTML placeholders.
-            page.wait_for_timeout(8000)
-            deadline = time.monotonic() + timeout
+            # Observe stability during the existing hydration grace period, rather
+            # than waiting eight seconds before starting the stability check.
+            started = time.monotonic()
+            deadline = started + timeout
             previous = None
             stable_since = time.monotonic()
             while time.monotonic() < deadline:
                 state = read_state(page)
                 if state != previous:
                     previous, stable_since = state, time.monotonic()
-                if state != 'UNKNOWN' and time.monotonic() - stable_since >= 3:
+                if (state != 'UNKNOWN' and time.monotonic() - started >= 8
+                        and time.monotonic() - stable_since >= 3):
+                    print('Page check seconds: {:.3f}'.format(time.monotonic() - started), flush=True)
                     return state
                 page.wait_for_timeout(500)
             raise RuntimeError('Neither stock button is visible')
@@ -138,14 +142,18 @@ def notify_stock():
     title = '【补货提醒】VCA VCARD35600 — ADD TO BAG 可见'
     body = f'{PRODUCT_NAME}\n检测时间（UTC）：{stamp}\nADD TO BAG 按钮可见，请打开网页核实并购买。\n{PRODUCT_URL}'
     failed = False
-    # Each channel is attempted independently, so Bark failure cannot prevent email.
-    for name, sender in [('Bark', send_bark), ('Gmail', send_email)]:
-        try:
-            sender(title, body)
-            print(name + ': accepted by service', flush=True)
-        except Exception as exc:
-            failed = True
-            print(name + ': failed (' + type(exc).__name__ + ')', flush=True)
+    # Start both transports immediately; one slow service cannot delay the other.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = {pool.submit(sender, title, body): name
+                   for name, sender in [('Bark', send_bark), ('Gmail', send_email)]}
+        for future in as_completed(futures):
+            name = futures[future]
+            try:
+                future.result()
+                print(name + ': accepted by service', flush=True)
+            except Exception as exc:
+                failed = True
+                print(name + ': failed (' + type(exc).__name__ + ')', flush=True)
     return 1 if failed else 0
 
 
