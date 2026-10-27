@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 PRODUCT_URL = 'https://www.apple.com/shop/buy-iphone/iphone-duo/7.6-inch-display-512gb-star-white-unlocked'
 PRODUCT_NAME = 'iPhone Duo 512GB Star White'
 EXPECTED_PART = 'MK1G4LL/A'
+PICKUP_URL = 'https://www.apple.com/shop/retail/pickup-message'
 ZIP_CODE = '11201'
 MAX_STORES = 12
 ARTIFACTS = Path('artifacts/iphone')
@@ -84,7 +85,8 @@ def parse_pickup(data, part=EXPECTED_PART):
     if not isinstance(head, dict) or head.get('status', 200) not in (200, '200'):
         raise CheckError('Pickup service reported failure')
     try:
-        pickup = data['body']['content']['pickupMessage']
+        body = data['body']
+        pickup = body if 'stores' in body else body['content']['pickupMessage']
         stores = pickup['stores']
     except (KeyError, TypeError):
         raise CheckError('Pickup response schema changed') from None
@@ -183,17 +185,13 @@ def check_stock(document=False):
                 raise CheckError('Product page did not return HTTP 200')
             part = verify_product(page)
             print('Verified exact configuration: ' + part + ' + unlocked', flush=True)
-            # Resolve the endpoint advertised by Apple's own page; do not use proxies or bypasses.
-            path = page.evaluate('window.fulfillmentBootstrap && window.fulfillmentBootstrap.pickupURL')
-            if not isinstance(path, str):
-                raise CheckError('Apple pickup endpoint missing')
-            endpoint = urljoin(PRODUCT_URL, path)
+            # Current public pickup API; the older fulfillment URL can return HTTP 541.
+            endpoint = PICKUP_URL
             parsed = urlparse(endpoint)
-            if parsed.scheme != 'https' or parsed.netloc != 'www.apple.com' or parsed.path != '/shop/fulfillment-messages':
+            if parsed.scheme != 'https' or parsed.netloc != 'www.apple.com' or parsed.path != '/shop/retail/pickup-message':
                 raise CheckError('Unexpected pickup endpoint')
             params = {
-                'parts.0': part, 'cppart': 'UNLOCKED/US', 'purchaseOption': 'fullPrice',
-                'location': ZIP_CODE,
+                'parts.0': part, 'pl': 'true', 'mts.0': 'regular', 'location': ZIP_CODE,
             }
             if document:
                 query = dict(parse_qsl(parsed.query))
@@ -204,7 +202,7 @@ def check_stock(document=False):
                 if response is None:
                     raise CheckError('Pickup document returned no response')
             else:
-                response = context.request.get(endpoint, params={**params, 'mts.0': 'regular'}, timeout=45000)
+                response = context.request.get(endpoint, params=params, timeout=45000)
             if response.status != 200:
                 raise CheckError('Apple pickup query HTTP ' + str(response.status) + '; inventory UNKNOWN')
             if 'json' not in response.headers.get('content-type', '').lower():
