@@ -11,11 +11,16 @@ on:
         default: check-only
 permissions:
   contents: read
-concurrency:
-  group: iphone-duo-fast
-  cancel-in-progress: false
 jobs:
   monitor:
+    name: Duo 512GB — ${{ matrix.color }}
+    strategy:
+      fail-fast: false
+      matrix:
+        color: [star-white, night-sky]
+    concurrency:
+      group: iphone-duo-fast-${{ matrix.color }}
+      cancel-in-progress: false
     runs-on: ubuntu-24.04
     timeout-minutes: 8
     env:
@@ -34,15 +39,15 @@ jobs:
         run: python -m pip install playwright==1.58.0
       - name: Check only
         if: inputs.mode == 'check-only'
-        run: python iphone_monitor.py --fast --check-only
+        run: python iphone_monitor.py --fast --color ${{ matrix.color }} --check-only
       - name: Check Duo and alert immediately
         if: inputs.mode == 'check'
-        run: python iphone_monitor.py --fast
+        run: python iphone_monitor.py --fast --color ${{ matrix.color }}
       - name: Save diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: iphone-fast-${{ github.run_id }}
-          path: artifacts/iphone/
+          name: iphone-fast-${{ matrix.color }}-${{ github.run_id }}
+          path: artifacts/
           if-no-files-found: ignore
           retention-days: 3
