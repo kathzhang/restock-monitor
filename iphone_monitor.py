@@ -22,10 +22,26 @@ from zoneinfo import ZoneInfo
 PRODUCT_URL = 'https://www.apple.com/shop/buy-iphone/iphone-duo/7.6-inch-display-512gb-star-white-unlocked'
 PRODUCT_NAME = 'iPhone Duo 512GB Star White'
 EXPECTED_PART = 'MK1G4LL/A'
+PRODUCT_COLOR = 'Star White'
+COLOR_LABEL = '白色'
 PICKUP_URL = 'https://www.apple.com/shop/retail/pickup-message'
 ZIP_CODE = '11201'
 MAX_STORES = 12
 ARTIFACTS = Path('artifacts/iphone')
+
+
+def configure_color(color):
+    """Each job handles one verified configuration in an isolated process."""
+    global PRODUCT_URL, PRODUCT_NAME, EXPECTED_PART, PRODUCT_COLOR, COLOR_LABEL, ARTIFACTS
+    profiles = {
+        'star-white': ('Star White', '白色', 'MK1G4LL/A'),
+        'night-sky': ('Night Sky', '黑色', 'MK1H4LL/A'),
+    }
+    PRODUCT_COLOR, COLOR_LABEL, EXPECTED_PART = profiles[color]
+    PRODUCT_NAME = 'iPhone Duo 512GB ' + PRODUCT_COLOR
+    PRODUCT_URL = ('https://www.apple.com/shop/buy-iphone/iphone-duo/'
+                   '7.6-inch-display-512gb-' + color + '-unlocked')
+    ARTIFACTS = Path('artifacts/iphone' if color == 'star-white' else 'artifacts/iphone-night-sky')
 
 
 class CheckError(RuntimeError):
@@ -86,8 +102,9 @@ def distance_miles(store):
     return value / 1.609344 if match.group(2).lower().startswith(('km', 'kilo')) else value
 
 
-def parse_pickup(data, part=EXPECTED_PART):
+def parse_pickup(data, part=None):
     """Strict parser: service errors/empty response/unknown fields never mean no stock."""
+    part = EXPECTED_PART if part is None else part
     if not isinstance(data, dict):
         raise CheckError('Pickup response is not an object')
     head = data.get('head', {})
@@ -165,7 +182,7 @@ def verify_product_jsonld(candidates):
     for product in products:
         if clean_text(product.get('name')) != PRODUCT_NAME:
             continue
-        if clean_text(product.get('color')) != 'Star White':
+        if clean_text(product.get('color')) != PRODUCT_COLOR:
             continue
         offers = product.get('offers', [])
         if isinstance(offers, dict):
@@ -366,7 +383,7 @@ def check_stock_ui(headed=False):
             page.get_by_role('button', name=re.compile(r'Check Availability')).last.click()
             overlay = page.locator('.rf-productlocator-overlay')
             overlay.wait_for(state='visible')
-            white = overlay.get_by_role('radio', name='Star White', exact=True)
+            white = overlay.get_by_role('radio', name=PRODUCT_COLOR, exact=True)
             capacity = overlay.get_by_role('radio', name=re.compile(r'^512GB'))
             white.check()
             capacity.check()
@@ -402,7 +419,7 @@ def check_stock_ui(headed=False):
 
 def notify(rows):
     now = datetime.now(ZoneInfo('America/New_York')).isoformat(timespec='seconds')
-    title = '【到店取货提醒】iPhone Duo 白色 512GB'
+    title = '【到店取货提醒】iPhone Duo ' + COLOR_LABEL + ' 512GB (' + PRODUCT_COLOR + ')'
     lines = [PRODUCT_NAME, 'Connect on your own later / Full price',
              f'ZIP {ZIP_CODE}，Apple 返回门店中最近 {MAX_STORES} 家', '检测时间（纽约）：' + now, '']
     for row in rows:
@@ -435,7 +452,9 @@ def main(argv=None):
     parser.add_argument('--headed', action='store_true', help='Show isolated browser; requires --ui')
     parser.add_argument('--document', action='store_true', help='Diagnose public pickup URL as browser document')
     parser.add_argument('--fast', action='store_true', help='Use Playwright HTTP session without Chromium')
+    parser.add_argument('--color', choices=('star-white', 'night-sky'), default='star-white')
     args = parser.parse_args(argv)
+    configure_color(args.color)
     if args.headed and not args.ui:
         parser.error('--headed requires --ui')
     try:
