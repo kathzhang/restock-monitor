@@ -28,6 +28,7 @@ jobs:
       EMAIL_TO: ${{ secrets.EMAIL_TO }}
       BARK_KEY: ${{ secrets.BARK_KEY }}
       VCA_BARK_ENABLED: ${{ vars.VCA_BARK_ENABLED || 'false' }}
+      VCA_AUTO_ADD_TO_BAG: ${{ vars.VCA_AUTO_ADD_TO_BAG || 'false' }}
       PYTHONUNBUFFERED: '1'
     steps:
       - uses: actions/checkout@v4
