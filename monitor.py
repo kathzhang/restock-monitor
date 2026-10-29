@@ -48,10 +48,19 @@ def attempt_add_to_bag(page):
     result = {'status': 'FAILED', 'sku': PRODUCT_SKU, 'scope': 'temporary-cloud-session'}
     cart_item = 'li.base-js-sb-product-item[data-sku="' + PRODUCT_SKU + '"]'
     try:
+        result['stage'] = 'verify_product'
         # Guard against wrong-product redirects and stale page state.
         page.get_by_text(PRODUCT_SKU, exact=True).wait_for(state='visible', timeout=3000)
         if not page.url.startswith(PRODUCT_URL):
             raise RuntimeError('Unexpected product page')
+        # A new cloud session may show consent over the add button. Only reject
+        # optional cookies; do not accept all or force a click through an overlay.
+        for name in ('Reject All', 'Reject all', 'Reject all cookies', 'Continue without accepting'):
+            reject = page.get_by_role('button', name=name, exact=True)
+            if reject.count() == 1 and reject.is_visible():
+                reject.click(timeout=2000)
+                break
+        result['stage'] = 'find_button'
         buttons = page.get_by_role('button', name=re.compile(r'^\s*ADD\s+TO\s+BAG\s*$', re.I))
         actionable = None
         for index in range(buttons.count()):
@@ -70,10 +79,13 @@ def attempt_add_to_bag(page):
         # Existing mini-bag SKU means verify the bag rather than increase quantity.
         existing = page.locator('li.vca-smm-item[data-sku="' + PRODUCT_SKU + '"]').count() > 0
         if not existing:
+            result['stage'] = 'click_add'
             actionable.click(timeout=4000, no_wait_after=True)
             # Wait for visible confirmation from the actual mini-bag, not generic text.
+            result['stage'] = 'wait_mini_bag'
             page.locator('li.vca-smm-item[data-sku="' + PRODUCT_SKU + '"]').wait_for(
                 state='attached', timeout=6000)
+        result['stage'] = 'verify_cart'
         response = page.goto(CART_URL, wait_until='domcontentloaded', timeout=10000)
         if response is None or response.status >= 400:
             raise RuntimeError('Cart page HTTP error')
@@ -87,7 +99,7 @@ def attempt_add_to_bag(page):
     except Exception:
         pass
     (ARTIFACTS / 'cart-result.json').write_text(json.dumps(result), encoding='utf-8')
-    print('Cloud cart result: ' + result['status'], flush=True)
+    print('Cloud cart result: ' + json.dumps(result), flush=True)
     return result
 
 
