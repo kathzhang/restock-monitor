@@ -17,6 +17,8 @@ from urllib.request import Request, urlopen
 PRODUCT_URL = 'https://www.vancleefarpels.com/us/en/collections/jewelry/alhambra/vcard35600---vintage-alhambra-bracelet-5-motifs.html'
 PRODUCT_NAME = 'Van Cleef & Arpels Vintage Alhambra bracelet, 5 motifs — VCARD35600'
 ARTIFACTS = Path('artifacts')
+CART_URL = 'https://www.vancleefarpels.com/us/en/secure/checkout/shopping-bag.html'
+PRODUCT_SKU = 'VCARD35600'
 
 
 def required(name):
@@ -32,6 +34,61 @@ def bark_enabled():
     if value not in ('true', 'false'):
         raise ValueError('VCA_BARK_ENABLED must be true or false')
     return value == 'true'
+
+
+def auto_cart_enabled():
+    value = os.environ.get('VCA_AUTO_ADD_TO_BAG', 'false').strip().lower()
+    if value not in ('true', 'false'):
+        raise ValueError('VCA_AUTO_ADD_TO_BAG must be true or false')
+    return value == 'true'
+
+
+def attempt_add_to_bag(page):
+    """One bounded add attempt; never click checkout, retry clicks, or export cookies."""
+    result = {'status': 'FAILED', 'sku': PRODUCT_SKU, 'scope': 'temporary-cloud-session'}
+    cart_item = 'li.base-js-sb-product-item[data-sku="' + PRODUCT_SKU + '"]'
+    try:
+        # Guard against wrong-product redirects and stale page state.
+        page.get_by_text(PRODUCT_SKU, exact=True).wait_for(state='visible', timeout=3000)
+        if not page.url.startswith(PRODUCT_URL):
+            raise RuntimeError('Unexpected product page')
+        buttons = page.get_by_role('button', name=re.compile(r'^\s*ADD\s+TO\s+BAG\s*$', re.I))
+        actionable = None
+        for index in range(buttons.count()):
+            candidate = buttons.nth(index)
+            if candidate.is_visible() and candidate.is_enabled() and candidate.evaluate('''el => {
+                for (let n = el; n instanceof Element; n = n.parentElement) {
+                    const s = getComputedStyle(n);
+                    if (Number(s.opacity) === 0 || s.contentVisibility === 'hidden') return false;
+                }
+                return true;
+            }'''):
+                actionable = candidate
+                break
+        if actionable is None:
+            raise RuntimeError('No actionable add button')
+        # Existing mini-bag SKU means verify the bag rather than increase quantity.
+        existing = page.locator('li.vca-smm-item[data-sku="' + PRODUCT_SKU + '"]').count() > 0
+        if not existing:
+            actionable.click(timeout=4000, no_wait_after=True)
+            # Wait for visible confirmation from the actual mini-bag, not generic text.
+            page.locator('li.vca-smm-item[data-sku="' + PRODUCT_SKU + '"]').wait_for(
+                state='attached', timeout=6000)
+        response = page.goto(CART_URL, wait_until='domcontentloaded', timeout=10000)
+        if response is None or response.status >= 400:
+            raise RuntimeError('Cart page HTTP error')
+        page.locator(cart_item).wait_for(state='visible', timeout=5000)
+        result['status'] = 'ALREADY_IN_BAG' if existing else 'ADDED'
+    except Exception as exc:
+        result['error_type'] = type(exc).__name__
+    ARTIFACTS.mkdir(exist_ok=True)
+    try:
+        page.screenshot(path=str(ARTIFACTS / 'cart-result.png'), full_page=True, timeout=5000)
+    except Exception:
+        pass
+    (ARTIFACTS / 'cart-result.json').write_text(json.dumps(result), encoding='utf-8')
+    print('Cloud cart result: ' + result['status'], flush=True)
+    return result
 
 
 def send_email(title, body):
@@ -111,7 +168,7 @@ def save_screenshot(page):
         print('Screenshot failed: ' + type(exc).__name__, flush=True)
 
 
-def detect_stock(timeout=45):
+def detect_stock(timeout=45, on_in_stock=None):
     from playwright.sync_api import sync_playwright
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -135,6 +192,8 @@ def detect_stock(timeout=45):
                 if (state != 'UNKNOWN' and time.monotonic() - started >= 8
                         and time.monotonic() - stable_since >= 3):
                     print('Page check seconds: {:.3f}'.format(time.monotonic() - started), flush=True)
+                    if state == 'IN_STOCK' and on_in_stock is not None:
+                        on_in_stock(page)
                     return state
                 page.wait_for_timeout(500)
             raise RuntimeError('Neither stock button is visible')
@@ -145,10 +204,19 @@ def detect_stock(timeout=45):
             browser.close()
 
 
-def notify_stock():
+def notify_stock(cart_result=None):
     stamp = datetime.now(timezone.utc).isoformat(timespec='seconds')
     title = '【补货提醒】VCA VCARD35600 — ADD TO BAG 可见'
     body = f'{PRODUCT_NAME}\n检测时间（UTC）：{stamp}\nADD TO BAG 按钮可见，请打开网页核实并购买。\n{PRODUCT_URL}'
+    if cart_result is not None:
+        labels = {'ADDED': '已在云端临时会话加入购物车并核对商品编号',
+                  'ALREADY_IN_BAG': '云端购物车已有该商品，未重复添加',
+                  'FAILED': '云端加购未能确认成功，请自行打开商品页购买'}
+        body += '\n\n加购结果：' + labels.get(cart_result['status'], '未知')
+        body += ('\n购物车入口：' + CART_URL +
+                 '\n注意：这是 GitHub 临时浏览器的独立购物车，不与手机或 Chrome 同步。'
+                 '普通链接不会携带云端购物车；任务结束后该会话不保留。'
+                 '加入购物车不代表锁定库存；未结账、未付款。')
     failed = False
     channels = [('Gmail', send_email)]
     if bark_enabled():
@@ -188,10 +256,18 @@ def main(argv=None):
             send_bark('【测试】VCA 重要警报', '这是响铃测试，不代表补货。')
             print('Test push accepted by Bark')
             return 0
-        state = detect_stock()
+        cart_result = None
+        def add_to_cart(page):
+            nonlocal cart_result
+            try:
+                cart_result = attempt_add_to_bag(page)
+            except Exception as exc:
+                # Diagnostic write failure must not suppress the stock email.
+                cart_result = {'status': 'FAILED', 'error_type': type(exc).__name__}
+        state = detect_stock(on_in_stock=add_to_cart if auto_cart_enabled() else None)
         print('Stock state: ' + state, flush=True)
         if state == 'IN_STOCK':
-            return notify_stock()
+            return notify_stock(cart_result)
         return 0
     except Exception as exc:
         # Never dump SMTP, HTTP exception text or credentials into Actions logs.
