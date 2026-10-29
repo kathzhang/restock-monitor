@@ -26,6 +26,14 @@ def required(name):
     return value
 
 
+def bark_enabled():
+    """VCA-only runtime switch; email-only unless explicitly enabled."""
+    value = os.environ.get('VCA_BARK_ENABLED', 'false').strip().lower()
+    if value not in ('true', 'false'):
+        raise ValueError('VCA_BARK_ENABLED must be true or false')
+    return value == 'true'
+
+
 def send_email(title, body):
     sender = required('GMAIL_USER')
     password = required('GMAIL_APP_PASSWORD').replace(' ', '')
@@ -142,10 +150,15 @@ def notify_stock():
     title = '【补货提醒】VCA VCARD35600 — ADD TO BAG 可见'
     body = f'{PRODUCT_NAME}\n检测时间（UTC）：{stamp}\nADD TO BAG 按钮可见，请打开网页核实并购买。\n{PRODUCT_URL}'
     failed = False
+    channels = [('Gmail', send_email)]
+    if bark_enabled():
+        channels.append(('Bark', send_bark))
+    else:
+        print('Bark: disabled by VCA_BARK_ENABLED', flush=True)
     # Start both transports immediately; one slow service cannot delay the other.
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = {pool.submit(sender, title, body): name
-                   for name, sender in [('Bark', send_bark), ('Gmail', send_email)]}
+                   for name, sender in channels}
         for future in as_completed(futures):
             name = futures[future]
             try:
@@ -169,6 +182,9 @@ def main(argv=None):
             print('Test email accepted by Gmail')
             return 0
         if args.test_bark:
+            if not bark_enabled():
+                print('Bark test skipped: VCA_BARK_ENABLED is false')
+                return 0
             send_bark('【测试】VCA 重要警报', '这是响铃测试，不代表补货。')
             print('Test push accepted by Bark')
             return 0
