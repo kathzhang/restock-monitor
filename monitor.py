@@ -55,8 +55,8 @@ def attempt_add_to_bag(page):
             raise RuntimeError('Unexpected product page')
         # A new cloud session may show consent over the add button. Only reject
         # optional cookies; do not accept all or force a click through an overlay.
-        for name in ('Reject All', 'Reject all', 'Reject all cookies', 'Continue without accepting'):
-            reject = page.get_by_role('button', name=name, exact=True)
+        for name in ('ALLOW TECHNICAL COOKIES', 'Reject All', 'Reject all', 'Reject all cookies', 'Continue without accepting'):
+            reject = page.get_by_text(name, exact=True)
             if reject.count() == 1 and reject.is_visible():
                 reject.click(timeout=2000)
                 break
