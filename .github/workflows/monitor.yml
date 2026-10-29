@@ -27,6 +27,7 @@ jobs:
       GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
       EMAIL_TO: ${{ secrets.EMAIL_TO }}
       BARK_KEY: ${{ secrets.BARK_KEY }}
+      VCA_BARK_ENABLED: ${{ vars.VCA_BARK_ENABLED || 'false' }}
       PYTHONUNBUFFERED: '1'
     steps:
       - uses: actions/checkout@v4
