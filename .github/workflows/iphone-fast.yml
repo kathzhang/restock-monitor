@@ -8,6 +8,7 @@ on:
         options:
           - check
           - check-only
+          - test-email
         default: check-only
 permissions:
   contents: read
@@ -38,6 +39,9 @@ jobs:
           cache: pip
       - name: Install Playwright API client (no browser download)
         run: python -m pip install playwright==1.58.0
+      - name: Test notification email
+        if: inputs.mode == 'test-email'
+        run: python iphone_monitor.py --color star-white --test-email
       - name: Check only
         if: inputs.mode == 'check-only'
         run: python iphone_monitor.py --fast --color ${{ matrix.color }} --check-only
