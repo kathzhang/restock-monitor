@@ -17,7 +17,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        color: [star-white, night-sky]
+        color: [star-white]
     concurrency:
       group: iphone-duo-fast-${{ matrix.color }}
       cancel-in-progress: false
@@ -27,7 +27,8 @@ jobs:
       GMAIL_USER: ${{ secrets.GMAIL_USER }}
       GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
       EMAIL_TO: ${{ secrets.EMAIL_TO }}
-      BARK_KEY: ${{ secrets.BARK_KEY }}
+      IPHONE_BARK_ENABLED: 'false'
+      IPHONE_EMAIL_EXTRA: ${{ secrets.IPHONE_EMAIL_EXTRA }}
       PYTHONUNBUFFERED: '1'
     steps:
       - uses: actions/checkout@v4
