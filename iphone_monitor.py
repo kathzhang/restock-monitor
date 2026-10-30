@@ -63,6 +63,9 @@ def required(name):
 
 def send_email(title, body):
     user, recipient = required('GMAIL_USER'), required('EMAIL_TO')
+    extra = os.environ.get('IPHONE_EMAIL_EXTRA', '').strip()
+    if extra:
+        recipient += ', ' + extra
     password = ''.join(required('GMAIL_APP_PASSWORD').split())
     for name, value in [('GMAIL_USER', user), ('EMAIL_TO', recipient), ('GMAIL_APP_PASSWORD', password)]:
         if not value.isascii():
@@ -76,6 +79,9 @@ def send_email(title, body):
 
 
 def send_bark(title, body):
+    if os.environ.get('IPHONE_BARK_ENABLED', 'false').lower() != 'true':
+        print('Bark: disabled', flush=True)
+        return
     payload = {'device_key': required('BARK_KEY'), 'title': title, 'body': body,
                'level': 'critical', 'call': '1', 'volume': '10', 'sound': 'alarm',
                'group': 'iPhone-pickup', 'url': PRODUCT_URL}
