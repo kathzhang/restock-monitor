@@ -42,7 +42,13 @@ jobs:
         run: python monitor.py --test-bark
       - name: Check stock
         if: github.event_name != 'workflow_dispatch' || inputs.mode == 'check'
-        run: python monitor.py
+        run: |
+          # Resume at 2026-11-01 07:00 America/New_York (EST, UTC-05:00).
+          if [ "$(date -u +%s)" -lt 1793534400 ]; then
+            echo "VCA paused until 2026-11-01 07:00 America/New_York; no stock check or alerts."
+            exit 0
+          fi
+          python monitor.py
       - name: Save diagnostic screenshot
         if: always()
         uses: actions/upload-artifact@v4
