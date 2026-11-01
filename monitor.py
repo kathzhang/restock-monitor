@@ -216,7 +216,22 @@ def detect_stock(timeout=45, on_in_stock=None):
             browser.close()
 
 
-def notify_stock(cart_result=None):
+def load_alert_state():
+    path = Path(os.environ.get('VCA_ALERT_STATE_FILE', '.vca-state/state.json'))
+    data = json.loads(path.read_text()) if path.exists() else {'version': 1, 'emails_sent': 0}
+    if data.get('version') != 1 or type(data.get('emails_sent')) is not int or not 0 <= data['emails_sent'] <= 3:
+        raise ValueError('Invalid persistent alert state')
+    return path, data
+
+
+def save_alert_state(path, data):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix('.tmp')
+    temporary.write_text(json.dumps(data), encoding='utf-8')
+    temporary.replace(path)
+
+
+def notify_stock(cart_result=None, email_accepted=None):
     stamp = datetime.now(timezone.utc).isoformat(timespec='seconds')
     title = '【补货提醒】VCA VCARD35600 — ADD TO BAG 可见'
     body = f'{PRODUCT_NAME}\n检测时间（UTC）：{stamp}\nADD TO BAG 按钮可见，请打开网页核实并购买。\n{PRODUCT_URL}'
@@ -243,6 +258,8 @@ def notify_stock(cart_result=None):
             name = futures[future]
             try:
                 future.result()
+                if name == 'Gmail' and email_accepted is not None:
+                    email_accepted()
                 print(name + ': accepted by service', flush=True)
             except Exception as exc:
                 failed = True
@@ -268,6 +285,8 @@ def main(argv=None):
             send_bark('【测试】VCA 重要警报', '这是响铃测试，不代表补货。')
             print('Test push accepted by Bark')
             return 0
+        state_path, alert_state = load_alert_state()
+        save_alert_state(state_path, alert_state)
         cart_result = None
         def add_to_cart(page):
             nonlocal cart_result
@@ -276,10 +295,21 @@ def main(argv=None):
             except Exception as exc:
                 # Diagnostic write failure must not suppress the stock email.
                 cart_result = {'status': 'FAILED', 'error_type': type(exc).__name__}
-        state = detect_stock(on_in_stock=add_to_cart if auto_cart_enabled() else None)
+        state = detect_stock(on_in_stock=add_to_cart if auto_cart_enabled() and alert_state['emails_sent'] < 3 else None)
         print('Stock state: ' + state, flush=True)
-        if state == 'IN_STOCK':
-            return notify_stock(cart_result)
+        if state == 'OUT_OF_STOCK':
+            alert_state['emails_sent'] = 0
+            save_alert_state(state_path, alert_state)
+            print('Alert count reset after confirmed OUT_OF_STOCK', flush=True)
+        elif state == 'IN_STOCK':
+            if alert_state['emails_sent'] >= 3:
+                print('Alerts paused: 3 emails sent; waiting for confirmed OUT_OF_STOCK', flush=True)
+                return 0
+            def accepted():
+                alert_state['emails_sent'] += 1
+                save_alert_state(state_path, alert_state)
+                print('Successful emails this stock cycle: ' + str(alert_state['emails_sent']), flush=True)
+            return notify_stock(cart_result, email_accepted=accepted)
         return 0
     except Exception as exc:
         # Never dump SMTP, HTTP exception text or credentials into Actions logs.
