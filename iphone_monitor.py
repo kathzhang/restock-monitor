@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apple pickup check for 11201, nearest 12 returned stores, 512GB Star White, carrier later."""
+"""Apple pickup check for 11201, nearest 12 returned stores, verified Duo configurations, carrier later."""
 import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
@@ -23,7 +23,7 @@ PRODUCT_URL = 'https://www.apple.com/shop/buy-iphone/iphone-duo/7.6-inch-display
 PRODUCT_NAME = 'iPhone Duo 512GB Star White'
 EXPECTED_PART = 'MK1G4LL/A'
 PRODUCT_COLOR = 'Star White'
-COLOR_LABEL = '白色'
+STORAGE = '512GB'
 PICKUP_URL = 'https://www.apple.com/shop/retail/pickup-message'
 ZIP_CODE = '11201'
 MAX_STORES = 12
@@ -32,16 +32,17 @@ ARTIFACTS = Path('artifacts/iphone')
 
 def configure_color(color):
     """Each job handles one verified configuration in an isolated process."""
-    global PRODUCT_URL, PRODUCT_NAME, EXPECTED_PART, PRODUCT_COLOR, COLOR_LABEL, ARTIFACTS
+    global PRODUCT_URL, PRODUCT_NAME, EXPECTED_PART, PRODUCT_COLOR, STORAGE, ARTIFACTS
     profiles = {
-        'star-white': ('Star White', '白色', 'MK1G4LL/A'),
-        'night-sky': ('Night Sky', '黑色', 'MK1H4LL/A'),
+        'star-white': ('Star White', '512GB', 'MK1G4LL/A'),
+        'night-sky': ('Night Sky', '512GB', 'MK1H4LL/A'),
+        'night-sky-256': ('Night Sky', '256GB', 'MK1F4LL/A'),
     }
-    PRODUCT_COLOR, COLOR_LABEL, EXPECTED_PART = profiles[color]
-    PRODUCT_NAME = 'iPhone Duo 512GB ' + PRODUCT_COLOR
+    PRODUCT_COLOR, STORAGE, EXPECTED_PART = profiles[color]
+    PRODUCT_NAME = f'iPhone Duo {STORAGE} {PRODUCT_COLOR}'
     PRODUCT_URL = ('https://www.apple.com/shop/buy-iphone/iphone-duo/'
-                   '7.6-inch-display-512gb-' + color + '-unlocked')
-    ARTIFACTS = Path('artifacts/iphone' if color == 'star-white' else 'artifacts/iphone-night-sky')
+                   f'7.6-inch-display-{STORAGE.lower()}-{color.removesuffix("-256")}-unlocked')
+    ARTIFACTS = Path('artifacts/iphone' if color == 'star-white' else 'artifacts/iphone-' + color)
 
 
 class CheckError(RuntimeError):
@@ -390,7 +391,7 @@ def check_stock_ui(headed=False):
             overlay = page.locator('.rf-productlocator-overlay')
             overlay.wait_for(state='visible')
             white = overlay.get_by_role('radio', name=PRODUCT_COLOR, exact=True)
-            capacity = overlay.get_by_role('radio', name=re.compile(r'^512GB'))
+            capacity = overlay.get_by_role('radio', name=re.compile('^' + STORAGE))
             white.check()
             capacity.check()
             location = overlay.get_by_role('combobox', name='City or Zip', exact=True)
@@ -425,12 +426,12 @@ def check_stock_ui(headed=False):
 
 def notify(rows):
     now = datetime.now(ZoneInfo('America/New_York')).isoformat(timespec='seconds')
-    title = '【到店取货提醒】iPhone Duo ' + COLOR_LABEL + ' 512GB (' + PRODUCT_COLOR + ')'
+    title = 'Available for Apple Store pickup: ' + PRODUCT_NAME
     lines = [PRODUCT_NAME, 'Connect on your own later / Full price',
-             f'ZIP {ZIP_CODE}，Apple 返回门店中最近 {MAX_STORES} 家', '检测时间（纽约）：' + now, '']
+             f'ZIP code: {ZIP_CODE} (up to {MAX_STORES} nearest stores returned by Apple)', 'Checked (New York time): ' + now, '']
     for row in rows:
-        lines.append(f"{row['name']}（{row['distance_miles']:g} mi）\n{row['quote']}")
-    lines.extend(['', PRODUCT_URL, '请打开网页确认并下单；本通知不会保留库存。'])
+        lines.append(f"{row['name']} ({row['distance_miles']:g} mi)\n{row['quote']}")
+    lines.extend(['', PRODUCT_URL, 'Confirm availability and order on Apple’s website. This alert does not reserve inventory.'])
     body = '\n'.join(lines)
     failures = 0
     with ThreadPoolExecutor(max_workers=2) as executor:
@@ -458,7 +459,7 @@ def main(argv=None):
     parser.add_argument('--headed', action='store_true', help='Show isolated browser; requires --ui')
     parser.add_argument('--document', action='store_true', help='Diagnose public pickup URL as browser document')
     parser.add_argument('--fast', action='store_true', help='Use Playwright HTTP session without Chromium')
-    parser.add_argument('--color', choices=('star-white', 'night-sky'), default='star-white')
+    parser.add_argument('--color', choices=('star-white', 'night-sky', 'night-sky-256'), default='star-white')
     args = parser.parse_args(argv)
     configure_color(args.color)
     if args.headed and not args.ui:
@@ -466,7 +467,8 @@ def main(argv=None):
     try:
         if args.test_email or args.test_bark:
             sender = send_email if args.test_email else send_bark
-            sender('【测试】iPhone Duo 取货监控', '这是通道测试，不代表有货。\n' + PRODUCT_URL)
+            sender('[Test] Apple Store pickup alerts: ' + PRODUCT_NAME,
+                   'This is a notification test. It does not indicate availability.\n' + PRODUCT_URL)
             print('Test accepted by service', flush=True)
             return 0
         rows = check_stock_fast() if args.fast else check_stock_ui(headed=args.headed) if args.ui else check_stock(document=True) if args.document else check_stock()
