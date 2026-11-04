@@ -27,9 +27,8 @@ jobs:
     env:
       GMAIL_USER: ${{ secrets.GMAIL_USER }}
       GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
-      EMAIL_TO: ${{ secrets.EMAIL_TO }}
+      EMAIL_TO: ${{ secrets.IPHONE_EMAIL_TO }}
       IPHONE_BARK_ENABLED: 'false'
-      IPHONE_EMAIL_EXTRA: ${{ secrets.IPHONE_EMAIL_EXTRA }}
       PYTHONUNBUFFERED: '1'
     steps:
       - uses: actions/checkout@v4
